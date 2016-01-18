@@ -1,11 +1,19 @@
 package com.mvgv70.xposed_mtc_manager;
 
 import java.io.BufferedReader;
+import java.io.DataOutputStream;
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileReader;
-import java.util.Iterator;
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
 import java.util.Properties;
 import java.util.Set;
+
+import com.mvgv70.utils.IniFile;
 
 import android.app.ActivityManager;
 import android.app.Service;
@@ -15,9 +23,11 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.media.AudioManager;
+import android.os.Environment;
 import android.util.Log;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XC_MethodReplacement;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
@@ -30,6 +40,7 @@ public class Main implements IXposedHookLoadPackage {
   private final static String WHITELIST_INI = EXTERNAL_SD + "/mtc-manager/whitelist.ini";
   private final static String START_SERVICES_INI = EXTERNAL_SD + "/mtc-manager/start_services.ini";
   private final static String SS_EXCEPTIONS_INI = EXTERNAL_SD + "/mtc-manager/ss_exceptions.ini";
+  private final static String MODE_INI = EXTERNAL_SD+"/mtc-manager/mode.ini";
   //
   private final static int MCU_GO_SLEEP = 240;
   private final static int MCU_WAKE_UP = 241;
@@ -47,6 +58,7 @@ public class Main implements IXposedHookLoadPackage {
   // процедура выключения выполнена
   private static volatile boolean didShutdown = false;
   // запущено ли радио
+  private static boolean xposedMCU = true;
   private static boolean isRadioRunning;
   private static Thread do_shutdown;
   private static Thread start_services;
@@ -58,6 +70,16 @@ public class Main implements IXposedHookLoadPackage {
   private static String screenSaverClass;
   private static int screenSaverTimeOut = 0;
   private static Set<String> ss_exceptions = null;
+  // bluetooth obd-устройство
+  private static String obdDevicesName = null;
+  private static List<String> obdDevicesList;
+  // modeSwitch
+  private static boolean modeSwitch = false;
+  private final static String APPS_SECTION = "apps";
+  private static IniFile mode_props = new IniFile();
+  private static List<String> mode_app_list = new ArrayList<String>();
+  private static String mode_app = "";
+  private static int mode_index = -1;
 	
   @Override
   public void handleLoadPackage(LoadPackageParam lpparam) throws Throwable {
@@ -79,8 +101,19 @@ public class Main implements IXposedHookLoadPackage {
         vi.addAction("com.microntek.VOLUME_CHANGED");
         microntekServer.registerReceiver(volumeReceiver, vi);
         Log.d(TAG,"Volume change receiver created");
-        // чтение настроек
-        readSettings();
+        // чтение настроечного файла
+      	if (Environment.getStorageState(new File(EXTERNAL_SD)).equals(Environment.MEDIA_MOUNTED))
+      	{
+      	  // чтение настроек
+      	  readSettings();
+      	  // параметры скринсейвера
+          processScreenSaver();
+      	  // быстрый запуск сервисов в отдельном потоке
+          startServiceThread();
+      	}
+      	else
+      	  // все сделаем при подключении external_sd
+      	  createMediaReceiver();
         // показать версию модуля
         try 
         {
@@ -90,23 +123,6 @@ public class Main implements IXposedHookLoadPackage {
         } catch (Exception e) {}
         // показать версию mcu
         Log.d(TAG,am.getParameters("sta_mcu_version="));
-        // параметры скринсейвера
-        if (screenSaverEnable)
-        {
-          // интент включения скринсейвера
-          IntentFilter si = new IntentFilter();
-          si.addAction("com.microntek.screensaver");
-          microntekServer.registerReceiver(screenSaverReceiver, si);
-          Log.d(TAG,"screensaver receiver created");
-          // интент выключения скринсейвера
-          IntentFilter ei = new IntentFilter();
-          ei.addAction("com.microntek.endclock");
-          ei.addAction("com.microntek.musicclockreset");
-          microntekServer.registerReceiver(endClockReceiver, ei);
-          Log.d(TAG,"end clock receiver created");
-        }
-        // быстрый запуск сервисов в отдельном потоке
-        startServiceThread();
         // OK
         Log.d(TAG,"onCreate.end");
       }
@@ -118,6 +134,7 @@ public class Main implements IXposedHookLoadPackage {
       @Override
       protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
         // параметры
+        if (!xposedMCU) return;
         byte[] paramArray = (byte[])param.args[0];
         int index = (int)param.args[1];
         @SuppressWarnings("unused")
@@ -158,64 +175,76 @@ public class Main implements IXposedHookLoadPackage {
         }
       }
     };
+    
+    // MicrontekServer.ModeSwitch()
+    XC_MethodHook ModeSwitch = new XC_MethodHook() {
+      
+      @Override
+      protected void beforeHookedMethod(MethodHookParam param) throws Throwable 
+      {
+        Log.d(TAG,"ModeSwitch");
+        if (modeSwitch)
+        {
+          modeSwitch(microntekServer);
+          // не вызываем штатный обработчик
+          param.setResult(null);
+        }
+      }
+    };
 	    
     // ClearProcess.getisdontclose(String)
     XC_MethodHook getisdontclose = new XC_MethodHook() {
       
       @Override
       protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-    	String pkg_name;
+    	// String pkg_name;
         String className = (String)param.args[0];
         if ((boolean)param.getResult() == false)
         {
           // если microntek собирается закрыть программу или сервис
-          Iterator<String> packages = white_list.iterator();
-          while (packages.hasNext()) 
-      	  {
-            pkg_name = packages.next();
-            if (className.startsWith(pkg_name))
-            {
-              Log.d(TAG,className+" not closed");
-              param.setResult(true);
-              break;
-            }
-      	  }
+          for (String pkg_name : white_list)
+          if (className.startsWith(pkg_name))
+          {
+            Log.d(TAG,className+" not closed");
+            param.setResult(true);
+            break;
+          }
         }
       }
     };
 	    
-    // ClearProcess.getisdontclose2(String)
-    XC_MethodHook getisdontclose2 = new XC_MethodHook() {
+    // BT*Model.isOBDDevice(String)
+    XC_MethodReplacement isOBDDevice = new XC_MethodReplacement() {
       
       @Override
-      protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-        String pkg_name;
-	    String className = (String)param.args[0];
-	    if ((boolean)param.getResult() == false)
-	    {
-	      // если microntek собирается закрыть программу или сервис
-          Iterator<String> packages = white_list.iterator();
-	      while (packages.hasNext()) 
-	      {
-	        pkg_name = packages.next();
-	        if (className.startsWith(pkg_name))
-	        {
-	          Log.d(TAG,className+" not closed");
-	          param.setResult(true);
-	          break;
-	        }
-	      }
-	    }
+      protected Object replaceHookedMethod(MethodHookParam param) throws Throwable 
+      {
+	    String deviceName = (String)param.args[0];
+	    if (obdDevicesList == null) return false;
+	    if (deviceName == null) return false;
+	    for (String name : obdDevicesList)
+	      if (deviceName.toUpperCase(Locale.US).contains(name)) return true;
+	    return false;
 	  }
     };
-	    
+
     // begin hooks
     if (!lpparam.packageName.equals("android.microntek.service")) return;
     Log.d(TAG,"android.microntek.service");
     XposedHelpers.findAndHookMethod("android.microntek.service.MicrontekServer", lpparam.classLoader, "cmdProc", byte[].class, int.class, int.class, cmdProc);
     XposedHelpers.findAndHookMethod("android.microntek.service.MicrontekServer", lpparam.classLoader, "onCreate", onCreate);
+    XposedHelpers.findAndHookMethod("android.microntek.service.MicrontekServer", lpparam.classLoader, "ModeSwitch", ModeSwitch);
     XposedHelpers.findAndHookMethod("android.microntek.ClearProcess", lpparam.classLoader, "getisdontclose", String.class, getisdontclose);
-    XposedHelpers.findAndHookMethod("android.microntek.ClearProcess", lpparam.classLoader, "getisdontclose2", String.class, getisdontclose2);
+    XposedHelpers.findAndHookMethod("android.microntek.ClearProcess", lpparam.classLoader, "getisdontclose2", String.class, getisdontclose);
+    try
+    {
+      XposedHelpers.findAndHookMethod("android.microntek.mtcser.model.BC5Model", lpparam.classLoader, "isOBDDevice", String.class, isOBDDevice);
+    } catch (Error e) {}
+    try
+    {
+      XposedHelpers.findAndHookMethod("android.microntek.mtcser.model.BC6Model", lpparam.classLoader, "isOBDDevice", String.class, isOBDDevice);
+    }
+    catch (Error e) {}
     Log.d(TAG,"android.microntek.service hook OK");
   }
   
@@ -225,7 +254,7 @@ public class Main implements IXposedHookLoadPackage {
     // белый список
     try
     {
-      Log.d(TAG,"load from "+WHITELIST_INI);
+      Log.d(TAG,"Main: load from "+WHITELIST_INI);
       props.load(new FileInputStream(WHITELIST_INI));
       white_list = props.stringPropertyNames();
       Log.d(TAG,"load white_list: count="+white_list.size());
@@ -279,7 +308,17 @@ public class Main implements IXposedHookLoadPackage {
         screenSaverPackage = props.getProperty("screenPackage","");
         screenSaverClass = props.getProperty("screenClass","");
       }
-      Log.d(TAG,"load common settings: count="+props.size());
+      // mcu
+      xposedMCU = props.getProperty("mcu_power","true").equals("true");
+      Log.d(TAG,"mcu_power="+xposedMCU);
+      // obd
+      obdDevicesName = props.getProperty("obd_device","OBD").toUpperCase(Locale.US);
+      if (obdDevicesName.isEmpty()) obdDevicesName = "OBD";
+      obdDevicesList = Arrays.asList(obdDevicesName.split("\\s*,\\s*"));
+      // modeSwitch
+      modeSwitch = props.getProperty("modeSwitch","false").equals("true");
+      // OK
+      Log.d(TAG,"obd_device="+obdDevicesName);
       Log.d(TAG,"ScreenSaverEnable="+screenSaverEnable);
       Log.d(TAG,"ScreenSaverTimeOut="+screenSaverTimeOut);
       Log.d(TAG,"ScreenSaverPackage="+screenSaverPackage);
@@ -288,6 +327,43 @@ public class Main implements IXposedHookLoadPackage {
     catch (Exception e)
     {
       Log.e(TAG,e.getMessage());
+    }
+    // mode.ini
+    mode_app_list.clear();
+    if (modeSwitch)
+    {
+      mode_props.clear();
+      try
+      {
+        Log.d(TAG,"mode from "+MODE_INI);
+        mode_props.loadFromFile(MODE_INI);
+        mode_app_list = mode_props.getLines(APPS_SECTION);
+        Log.d(TAG,"mode app count "+mode_app_list.size());
+      }
+      catch (Exception e)
+      {
+        Log.e(TAG,e.getMessage());
+      }
+    }
+  }
+  
+  // настройка скринсейвера
+  private void processScreenSaver()
+  {
+    // параметры скринсейвера
+    if (screenSaverEnable)
+    {
+      // интент включения скринсейвера
+      IntentFilter si = new IntentFilter();
+      si.addAction("com.microntek.screensaver");
+      microntekServer.registerReceiver(screenSaverReceiver, si);
+      Log.d(TAG,"screensaver receiver created");
+      // интент выключения скринсейвера
+      IntentFilter ei = new IntentFilter();
+      ei.addAction("com.microntek.endclock");
+      ei.addAction("com.microntek.musicclockreset");
+      microntekServer.registerReceiver(endClockReceiver, ei);
+      Log.d(TAG,"end clock receiver created");
     }
   }
 
@@ -533,7 +609,228 @@ public class Main implements IXposedHookLoadPackage {
     {
       XposedHelpers.setBooleanField(microntekServer, "ScreenSaverOn", false);
     }
- };
+  };
+  
+  // включить обработчик подключения носителей
+  private void createMediaReceiver()
+  {
+	IntentFilter ui = new IntentFilter();
+    ui.addAction(Intent.ACTION_MEDIA_MOUNTED);
+    ui.addDataScheme("file");
+    microntekServer.registerReceiver(mediaReceiver, ui);
+    Log.d(TAG,"media mount receiver created");
+  }
+  
+  // обработчик MEDIA_MOUNT
+  private BroadcastReceiver mediaReceiver = new BroadcastReceiver()
+  {
+    public void onReceive(Context context, Intent intent)
+    {
+      String action = intent.getAction(); 
+      String drivePath = intent.getData().getPath();
+      Log.d(TAG,"media receiver:"+drivePath+" "+action);
+      if (action.equals(Intent.ACTION_MEDIA_MOUNTED))
+    	// если подключается external_sd
+        if (EXTERNAL_SD.equals(drivePath))
+        {
+          // читаем настройки
+          readSettings();
+          // запускаем сервисы
+          startServiceThread();
+          // параметры скринсейвера
+          processScreenSaver();
+        }
+    }
+  };
 
+  // запуск/остановка приложения 
+  private void handleModeApp(Context context, String app, String action, String defaultSend, String defaultIntent)
+  {
+    // параметры из mode.ini
+    String section = app+":"+action;
+    String intent_name = mode_props.getValue(section, "intent", defaultIntent);
+    String send = mode_props.getValue(section, "send", defaultSend);
+    String extra = mode_props.getValue(section, "extra", "");
+    String value = mode_props.getValue(section, "value", "");
+    String extra_type = mode_props.getValue(section, "extra_type", "");
+    String packageName = mode_props.getValue(section, "package", app);
+    String serviceName = mode_props.getValue(section, "service", "");
+    String command = mode_props.getValue(section, "command", "");
+    //
+    Log.d(TAG,section);
+    Log.d(TAG,"intent_name="+intent_name);
+    Log.d(TAG,"send="+send);
+    Log.d(TAG,"extra="+extra);
+    Log.d(TAG,"extra_type="+extra_type);
+    Log.d(TAG,"value="+value);
+    Log.d(TAG,"packageName="+packageName);
+    Log.d(TAG,"serviceName="+serviceName);
+    Log.d(TAG,"command="+command);
+    // component name
+    ComponentName cn = new ComponentName(packageName, serviceName);
+    // обрабатываем
+    Intent intent;
+    if (intent_name.equalsIgnoreCase("default"))
+    {
+      Log.d(TAG,"find default activity");
+      // найдем activity по-умолчанию
+      intent = context.getPackageManager().getLaunchIntentForPackage(app);
+      if (intent != null)
+        intent.addFlags(Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+      else
+      {
+        Log.w(TAG,"default activity not found for "+app);
+        return;
+      }
+    }
+    else
+    {
+      if (intent_name.isEmpty())
+        intent = new Intent();
+      else
+        intent = new Intent(intent_name);
+    }
+    Log.d(TAG,"intent created");
+    // component
+    if (!packageName.isEmpty() && !serviceName.isEmpty())
+    {
+      Log.d(TAG,"setComponent");
+      intent.setComponent(cn);
+    }
+    Log.d(TAG,"after setComponent");
+    // добавим extra
+    if (!extra.isEmpty())
+    {
+      Log.d(TAG,extra+"="+value);
+      // в зависимости от extra_type
+      if (extra_type.equalsIgnoreCase("int"))
+        intent.putExtra(extra,Integer.valueOf(value));
+      else if (extra_type.equalsIgnoreCase("long"))
+        intent.putExtra(extra,Long.valueOf(value));
+      else
+        intent.putExtra(extra,value);
+    }
+    Log.d(TAG,"if: send="+send);
+    // как запускаем: service/activity/intent/cmd/none
+    if (send.equalsIgnoreCase("intent"))
+    {
+      Log.d(TAG,"send intent "+intent_name);
+      context.sendBroadcast(intent);
+    }
+    else if (send.equalsIgnoreCase("service"))
+    {
+      Log.d(TAG,"start service "+intent_name);
+      try
+      {
+        context.startService(intent);
+      }
+      catch (Exception e)
+      {
+        Log.e(TAG,"start service: "+e.getMessage());
+      }
+    }
+    else if (send.equalsIgnoreCase("activity"))
+    {
+      Log.d(TAG,"start activity for "+app);
+      try
+      {
+        context.startActivity(intent);
+      }
+      catch (Exception e)
+      {
+        Log.e(TAG,"start activity: "+e.getMessage());
+      }
+    }
+    else if (send.equalsIgnoreCase("cmd"))
+    {
+      // выполним комманду command
+      Log.d(TAG,"execute "+command);
+      if (!command.isEmpty()) executeCmd(command);
+    }
+    else if (send.equalsIgnoreCase("none"))
+    {
+      // ничего не делаем
+      Log.d(TAG,"do nothing");
+    }
+  }
+  
+  // переключение приложений
+  private void modeSwitch(Context context)
+  {
+	if (mode_app_list.size() < 0) return;
+    try
+    {
+	  // определить активную программу и ее индекс
+	  try 
+      {
+		ActivityManager acm = (ActivityManager)context.getSystemService(Context.ACTIVITY_SERVICE);
+        List<ActivityManager.RunningTaskInfo> taskList = acm.getRunningTasks(10);
+        for (ActivityManager.RunningTaskInfo task : taskList)
+        {
+          if (mode_app_list.contains(task.baseActivity.getPackageName())) 
+          {
+            mode_app = task.baseActivity.getPackageName();
+            mode_index = mode_app_list.indexOf(mode_app);
+            Log.d(TAG,"mode_app="+mode_app+", mode_index="+mode_index);
+            break;
+          }
+        }
+      } catch (Exception e) {}
+	  // следующий индекс
+	  int index;
+      if ((mode_index+1) < mode_app_list.size())
+        index = mode_index+1;
+      else
+        index = 0;
+      Log.d(TAG,"next="+index);
+      // текущая программа: останавливаем
+      if (!mode_app.isEmpty()) handleModeApp(context, mode_app, "stop", "intent", "");
+      // запускаемая программа
+      String run_app = mode_app_list.get(index);
+      Log.d(TAG,"runApp="+run_app);
+      // стартуем следующую
+      handleModeApp(context, run_app, "run", "activity", "default");
+      // запускаем
+      handleModeApp(context, run_app, "start", "intent", "");
+      mode_app = run_app;
+      mode_index = index;
+    }
+    catch (Exception e)
+    {
+      Log.e(TAG,e.getMessage());
+    }
+  }
+  
+  // выполнение команды с привилегиями root
+  private void executeCmd(String command)
+  {
+    // su (as root)
+    Process process = null;
+ 	DataOutputStream os = null;
+    InputStream err = null;
+ 	try 
+ 	{
+ 	  process = Runtime.getRuntime().exec("su");
+ 	  os = new DataOutputStream(process.getOutputStream());
+ 	  err = process.getErrorStream();
+ 	  os.writeBytes(command+" \n");
+      os.writeBytes("exit \n");
+      os.flush();
+      os.close();
+      process.waitFor();
+      // анализ ошибок
+      byte[] buffer = new byte[1024];
+      int len = err.read(buffer);
+      if (len > 0)
+      {
+        String errmsg = new String(buffer,0,len);
+        Log.e(TAG,errmsg);
+      } 
+    } 
+ 	catch (Exception e) 
+ 	{
+      Log.e(TAG,e.getMessage());
+    }
+  }
   
 }
