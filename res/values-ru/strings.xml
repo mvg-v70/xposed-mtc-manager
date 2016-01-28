@@ -1,4 +1,14 @@
-<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_desc">Модификации ядра Microntek</string>
+
+    <string name="app_desc">Показ имен радиостанций в приложении Радио</string>
+    <string name="station_list_menu_item">Список радиостаниций</string>
+    <string name="save_settings_menu_item">Сохранить настройки</string>
+    <string name="station_list_title">Список радиостаниций</string>
+    <string name="restore_settings_menu_item">Восстановить настройки</string>
+    <string name="save_settings_query">Сохранить настройки?</string>
+    <string name="restore_settings_query">Восстановить настройки?</string>
+    <string name="settings_copy_error">При копировании настроек произошла ошибка</string>
+    <string name="settings_copy_success">Успешное копирование настроек</string>
+    <string name="station_list_empty">Список радиостаниций пуст</string>
+
 </resources>

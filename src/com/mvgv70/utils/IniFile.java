@@ -57,9 +57,9 @@ public class IniFile
             String key = line.substring(0,equalIndex).trim();
             String value = line.substring(equalIndex+1).trim();
             ini_file.get(section).add(key+"="+value);
-         }
+          }
           else
-           ini_file.get(section).add(line);
+            ini_file.get(section).add(line);
         }
       }
     }
@@ -86,6 +86,51 @@ public class IniFile
       return ini_file.get(section).iterator();
 	else
 	  return null;
+  }
+  
+  public class KeyIterator implements Iterator<String>
+  {
+    private Iterator<String> iterator;
+    private ArrayList<String> asection = new ArrayList<String>();
+	  
+    KeyIterator(String section)
+    {
+      asection = ini_file.get(section);
+      iterator = asection.iterator();
+    }
+
+    @Override
+    public boolean hasNext() 
+    {
+      return iterator.hasNext();
+	}
+
+    @Override
+    public String next() 
+    {
+      String line = iterator.next();
+      int equalIndex = line.indexOf("=");
+      if (equalIndex > 0)
+        line = line.substring(0,equalIndex).trim();
+      return line;
+	}
+
+    @Override
+    public void remove() 
+    {
+      iterator.remove();
+    }
+    
+    public int size()
+    {
+      return asection.size();
+    }
+	  
+  };
+  
+  public KeyIterator enumKeys(String section)
+  {
+    return new KeyIterator(section);
   }
   
   public List<String> getLines(String section)
