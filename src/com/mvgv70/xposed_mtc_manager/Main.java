@@ -201,6 +201,7 @@ public class Main implements IXposedHookLoadPackage {
         String className = (String)param.args[0];
         if ((boolean)param.getResult() == false)
         {
+          if (white_list == null) return;
           // если microntek собираетс€ закрыть программу или сервис
           for (String pkg_name : white_list)
           if (className.startsWith(pkg_name))
