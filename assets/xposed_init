@@ -1,1 +1,4 @@
 com.mvgv70.xposed_mtc_manager.Main
+com.mvgv70.xposed_mtc_manager.Bluetooth
+com.mvgv70.xposed_mtc_manager.Settings
+com.mvgv70.xposed_mtc_manager.Radio

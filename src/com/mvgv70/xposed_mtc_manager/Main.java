@@ -24,6 +24,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.media.AudioManager;
 import android.os.Environment;
+import android.provider.Settings;
 import android.util.Log;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -45,6 +46,7 @@ public class Main implements IXposedHookLoadPackage {
   private final static int MCU_GO_SLEEP = 240;
   private final static int MCU_WAKE_UP = 241;
   private final static int MCU_ILLUMINATION = 147;
+  // private final static int MCU_READY = 135;
   // private final static int MCU_KEY_DOWN = 142;
   // private final static int MCU_KEY_UP = 143;
   // private final static int MCU_BACK_VIEW = 158;
@@ -60,6 +62,7 @@ public class Main implements IXposedHookLoadPackage {
   // запущено ли радио
   private static boolean xposedMCU = true;
   private static boolean isRadioRunning;
+  private static String radioFreq = "";
   private static Thread do_shutdown;
   private static Thread start_services;
   // список исключений для таск-киллера
@@ -71,8 +74,8 @@ public class Main implements IXposedHookLoadPackage {
   private static int screenSaverTimeOut = 0;
   private static Set<String> ss_exceptions = null;
   // bluetooth obd-устройство
-  private static String obdDevicesName = null;
-  private static List<String> obdDevicesList;
+  private static String obdDevicesName = "";
+  private static List<String> obdDevicesList = null;
   // modeSwitch
   private static boolean modeSwitch = false;
   private final static String APPS_SECTION = "apps";
@@ -80,6 +83,8 @@ public class Main implements IXposedHookLoadPackage {
   private static List<String> mode_app_list = new ArrayList<String>();
   private static String mode_app = "";
   private static int mode_index = -1;
+  // clear last app
+  private static boolean clear_last_app = false;
 	
   @Override
   public void handleLoadPackage(LoadPackageParam lpparam) throws Throwable {
@@ -92,28 +97,6 @@ public class Main implements IXposedHookLoadPackage {
         Log.d(TAG,"onCreate");
         microntekServer = (Service)param.thisObject;
         am = ((AudioManager)microntekServer.getSystemService(Context.AUDIO_SERVICE));
-        // переключение приложений
-        IntentFilter ai = new IntentFilter();
-        ai.addAction("com.microntek.canbusdisplay");
-        microntekServer.registerReceiver(appsReceiver, ai);
-        // изменение внутренней переменной для mtc-volume
-        IntentFilter vi = new IntentFilter();
-        vi.addAction("com.microntek.VOLUME_CHANGED");
-        microntekServer.registerReceiver(volumeReceiver, vi);
-        Log.d(TAG,"Volume change receiver created");
-        // чтение настроечного файла
-      	if (Environment.getStorageState(new File(EXTERNAL_SD)).equals(Environment.MEDIA_MOUNTED))
-      	{
-      	  // чтение настроек
-      	  readSettings();
-      	  // параметры скринсейвера
-          processScreenSaver();
-      	  // быстрый запуск сервисов в отдельном потоке
-          startServiceThread();
-      	}
-      	else
-      	  // все сделаем при подключении external_sd
-      	  createMediaReceiver();
         // показать версию модуля
         try 
         {
@@ -123,6 +106,34 @@ public class Main implements IXposedHookLoadPackage {
         } catch (Exception e) {}
         // показать версию mcu
         Log.d(TAG,am.getParameters("sta_mcu_version="));
+        // переключение приложений
+        IntentFilter ai = new IntentFilter();
+        ai.addAction("com.microntek.canbusdisplay");
+        microntekServer.registerReceiver(appsReceiver, ai);
+        // изменение внутренней переменной для mtc-volume
+        IntentFilter vi = new IntentFilter();
+        vi.addAction("com.microntek.VOLUME_CHANGED");
+        microntekServer.registerReceiver(volumeReceiver, vi);
+        Log.d(TAG,"Volume change receiver created");
+        // частота радио
+        IntentFilter ri = new IntentFilter();
+        ri.addAction("com.android.radio.mcu");
+        microntekServer.registerReceiver(radioFreqReceiver, ri);
+        // чтение настроечного файла
+      	if (Environment.getStorageState(new File(EXTERNAL_SD)).equals(Environment.MEDIA_MOUNTED))
+      	{
+      	  // чтение настроек
+      	  readSettings();
+      	  // параметры скринсейвера
+          processScreenSaver();
+      	  // быстрый запуск сервисов в отдельном потоке
+          startServiceThread();
+          // TODO: убираем признак последнего запущеннного приложения
+          clearLastApp();
+      	}
+      	else
+      	  // все сделаем при подключении external_sd
+      	  createMediaReceiver();
         // OK
         Log.d(TAG,"onCreate.end");
       }
@@ -228,7 +239,7 @@ public class Main implements IXposedHookLoadPackage {
 	    return false;
 	  }
     };
-
+    
     // begin hooks
     if (!lpparam.packageName.equals("android.microntek.service")) return;
     Log.d(TAG,"android.microntek.service");
@@ -314,10 +325,12 @@ public class Main implements IXposedHookLoadPackage {
       Log.d(TAG,"mcu_power="+xposedMCU);
       // obd
       obdDevicesName = props.getProperty("obd_device","OBD").toUpperCase(Locale.US);
-      if (obdDevicesName.isEmpty()) obdDevicesName = "OBD";
-      obdDevicesList = Arrays.asList(obdDevicesName.split("\\s*,\\s*"));
       // modeSwitch
       modeSwitch = props.getProperty("modeSwitch","false").equals("true");
+      Log.d(TAG,"modeSwitch="+modeSwitch);
+      // clear last app
+      clear_last_app = props.getProperty("clear_last_app","false").equals("true");
+      Log.d(TAG,"clear_last_app="+clear_last_app);
       // OK
       Log.d(TAG,"obd_device="+obdDevicesName);
       Log.d(TAG,"ScreenSaverEnable="+screenSaverEnable);
@@ -329,6 +342,9 @@ public class Main implements IXposedHookLoadPackage {
     {
       Log.e(TAG,e.getMessage());
     }
+    // obd
+    if (obdDevicesName.isEmpty()) obdDevicesName = "OBD";
+    obdDevicesList = Arrays.asList(obdDevicesName.split("\\s*,\\s*"));
     // mode.ini
     mode_app_list.clear();
     if (modeSwitch)
@@ -395,6 +411,7 @@ public class Main implements IXposedHookLoadPackage {
       {
         while ((line = br.readLine()) != null)
         {
+          if (line.isEmpty()) continue;
           if (line.startsWith("#")) continue;
           if (line.startsWith(";")) continue;
           int pos = line.indexOf("/");
@@ -495,8 +512,8 @@ public class Main implements IXposedHookLoadPackage {
       // включаем радио, если оно было включено
       if (isRadioRunning)
       {
-    	// именно в таком порядке
         am.setParameters("av_channel_enter=fm");
+        if (!radioFreq.isEmpty()) am.setParameters(radioFreq);
         am.setParameters("ctl_radio_mute=false");
       }
       // не вызываем штатный обработчик
@@ -506,7 +523,7 @@ public class Main implements IXposedHookLoadPackage {
       // завершение работы уже выполнено
       return false;
   }
-	  
+  
   // обработчик переключения приложений
   private BroadcastReceiver appsReceiver = new BroadcastReceiver()
   {
@@ -519,6 +536,17 @@ public class Main implements IXposedHookLoadPackage {
         isRadioRunning = true;
       else if (event.equals("radio-off"))
 	    isRadioRunning = false;      
+    }
+  };
+  
+  // частота радио
+  private BroadcastReceiver radioFreqReceiver = new BroadcastReceiver()
+  {
+	  
+    public void onReceive(Context context, Intent intent)
+    {
+      radioFreq = intent.getStringExtra("command");
+      Log.d(TAG,"freq="+radioFreq);
     }
   };
 	  
@@ -559,13 +587,13 @@ public class Main implements IXposedHookLoadPackage {
       if (ss_exceptions != null)
       {
         // не запускать в списке исключений
-  	    if (ss_exceptions.contains(topPackage)) 
-  	    {
+        if (ss_exceptions.contains(topPackage)) 
+        {
           Log.d(TAG,topPackage+" in screensaver exception list");
           XposedHelpers.setBooleanField(microntekServer, "ScreenSaverOn", false);
           XposedHelpers.setIntField(microntekServer, "ScreenSaverTimer",0);
-  	      return;
-  	    }
+          return;
+        }
       }
       try 
       {
@@ -592,13 +620,13 @@ public class Main implements IXposedHookLoadPackage {
       // явно задан активити для creeen saver
       intent = new Intent();
       intent.setComponent(new ComponentName(screenSaverPackage, screenSaverPackage+"."+screenSaverClass));
-      intent.addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED | Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+      intent.addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS | Intent.FLAG_ACTIVITY_NO_HISTORY | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED | Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
     }
     else
     {
       // запускаем общим интенотом
       intent = new Intent("com.microntek.ClockScreen");
-      intent.addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED | Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+      intent.addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS | Intent.FLAG_ACTIVITY_NO_HISTORY | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED | Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
     }
     return intent;
   }
@@ -832,6 +860,14 @@ public class Main implements IXposedHookLoadPackage {
  	{
       Log.e(TAG,e.getMessage());
     }
+  }
+  
+  private static void clearLastApp()
+  {
+    String last_package_name = Settings.System.getString(microntekServer.getContentResolver(),"microntek.lastpackname");
+    Log.d(TAG,"last_package_name="+last_package_name);
+    if (clear_last_app)
+      Settings.System.putString(microntekServer.getContentResolver(),"microntek.lastpackname",",,");
   }
   
 }
