@@ -1,25 +1,26 @@
 package com.mvgv70.xposed_mtc_manager;
 
-import java.io.FileInputStream;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
-import java.util.Properties;
 
+import com.mvgv70.utils.Utils;
+
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.os.Bundle;
 import android.util.Log;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XC_MethodReplacement;
-import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
 public class Settings implements IXposedHookLoadPackage {
 	
   private final static String TAG = "xposed-mtc-manager";
-  private static Properties props = new Properties();
-  private final static String EXTERNAL_SD = "/mnt/external_sd";
-  private final static String SETTINGS_INI = EXTERNAL_SD + "/mtc-manager/settings.ini";
+  private static Context mContext = null;
   // bluetooth obd-устройство
   private static String obdDevicesName = null;
   private static List<String> obdDevicesList;
@@ -46,7 +47,20 @@ public class Settings implements IXposedHookLoadPackage {
     protected void afterHookedMethod(MethodHookParam param) throws Throwable 
     {
       Log.d(TAG,"MtcBluetoothSettings.onCreate");
+      mContext = (Context)Utils.getObjectField(param.thisObject,"mContext");
+      createReceivers();
       readSettings();
+    }
+  };
+  
+  // MtcBluetoothSettings.onDestroy()
+  XC_MethodHook onDestroy = new XC_MethodHook() {
+
+    @Override
+    protected void afterHookedMethod(MethodHookParam param) throws Throwable 
+    {
+      Log.d(TAG,"MtcBluetoothSettings.onDestroy");
+      mContext.unregisterReceiver(paramsReceiver);
     }
   };
 		
@@ -55,28 +69,45 @@ public class Settings implements IXposedHookLoadPackage {
   {    
     // begin hooks
     if (!lpparam.packageName.equals("com.android.settings")) return;
-    XposedHelpers.findAndHookMethod("com.android.settings.MtcBluetoothSettings", lpparam.classLoader, "isOBDDevice", String.class, isOBDDevice);
-    XposedHelpers.findAndHookMethod("com.android.settings.MtcBluetoothSettings", lpparam.classLoader, "onCreate", Bundle.class, onCreate);
+    Utils.setTag(TAG);
+    Utils.readXposedMap();
+    Utils.findAndHookMethod("com.android.settings.MtcBluetoothSettings", lpparam.classLoader, "isOBDDevice", String.class, isOBDDevice);
+    Utils.findAndHookMethod("com.android.settings.MtcBluetoothSettings", lpparam.classLoader, "onCreate", Bundle.class, onCreate);
+    Utils.findAndHookMethod("com.android.settings.MtcBluetoothSettings", lpparam.classLoader, "onDestroy", onDestroy);
     Log.d(TAG,"com.android.settings OK");
-  }	  
-
+  }
+  
+  // создание ресивера
+  private static void createReceivers()
+  {
+    IntentFilter pi = new IntentFilter();
+    pi.addAction(Microntek.INTENT_MTC_PARAMS_LIST);
+    mContext.registerReceiver(paramsReceiver, pi);
+    Log.d(TAG,"Settings: params receivers created");
+  }
+ 
   // чтение настроек
   private void readSettings()
   {
-    // общие настройки
-    try
-    {
-      Log.d(TAG,"Settings: load from "+SETTINGS_INI);
-      props.load(new FileInputStream(SETTINGS_INI));
-      // obd
-      obdDevicesName = props.getProperty("obd_device","OBD").toUpperCase(Locale.US);
-      if (obdDevicesName.isEmpty()) obdDevicesName = "OBD";
-      obdDevicesList = Arrays.asList(obdDevicesName.split("\\s*,\\s*"));
-    }
-    catch (Exception e)
-    {
-      Log.e(TAG,e.getMessage());
-    }
+    // пошлем запрос на получение параметров
+    Intent intent = new Intent(Microntek.INTENT_MTC_PARAMS_QUERY);
+    mContext.sendBroadcast(intent);
   }
+  
+  // внутренний обработчик получения параметров
+  private static BroadcastReceiver paramsReceiver = new BroadcastReceiver()
+  {
+    public void onReceive(Context context, Intent intent)
+    {
+      String action = intent.getAction(); 
+      if (action.equals(Microntek.INTENT_MTC_PARAMS_LIST))
+      { 
+        // имя obd-девайса
+        obdDevicesName = intent.getStringExtra("obd_device");
+        obdDevicesList = Arrays.asList(obdDevicesName.split("\\s*,\\s*"));
+        Log.d(TAG,"Settings: obd_device="+obdDevicesName);
+      }
+    }
+ };
 
 }

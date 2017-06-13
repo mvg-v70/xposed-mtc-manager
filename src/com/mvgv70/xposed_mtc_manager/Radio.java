@@ -1,52 +1,52 @@
 package com.mvgv70.xposed_mtc_manager;
 
-import de.robv.android.xposed.IXposedHookLoadPackage;
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
+import com.mvgv70.utils.Utils;
+
 import android.app.Activity;
 import android.content.Intent;
 import android.os.Bundle;
 import android.util.Log;
+import de.robv.android.xposed.IXposedHookLoadPackage;
+import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 public class Radio implements IXposedHookLoadPackage
 {
+  private static final String TAG = "xposed-mtc-manager";
   private static Activity radioActivity;
-  private final static String TAG = "xposed-mtc-manager";
+  public final static String INTENT_MTC_RADIO_MCU = "com.mvgv70.radio.mcu";
   
-  @Override
-  public void handleLoadPackage(LoadPackageParam lpparam) throws Throwable 
-  {
-    // RadioActivity.onCreate()
-    XC_MethodHook onCreate = new XC_MethodHook() {
-	           
-      @Override
-      protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+  public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
+  
+    XC_MethodHook onCreate = new XC_MethodHook()
+    {
+      protected void afterHookedMethod(XC_MethodHook.MethodHookParam param) throws Throwable
+      {
+        Log.d(TAG,"Radio.onCreate");
         radioActivity = (Activity)param.thisObject;
       }
     };
-
-    // AudioManager.setParameters(String)
-    XC_MethodHook setParameters = new XC_MethodHook() {
-	           
-      @Override
-      protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-    	String value = (String)param.args[0];
-    	if (value.startsWith("ctl_radio_frequency=")) 
+    
+    XC_MethodHook setParameters = new XC_MethodHook()
+    {
+      protected void afterHookedMethod(XC_MethodHook.MethodHookParam param) throws Throwable
+      {
+        String mcuCommand = (String)param.args[0];
+        if (mcuCommand.startsWith("ctl_radio_frequency="))
         {
-    	  Intent intent = new Intent("com.android.radio.mcu");
-    	  intent.putExtra("command", value);
-    	  radioActivity.sendBroadcast(intent);
+          Intent intent = new Intent(INTENT_MTC_RADIO_MCU);
+          intent.putExtra("command", mcuCommand);
+          radioActivity.sendBroadcast(intent);
         }
       }
     };
-    
-    // start hooks  
     if (!lpparam.packageName.equals("com.microntek.radio")) return;
-    Log.d(TAG,"package com.microntek.radio");
-    XposedHelpers.findAndHookMethod("com.microntek.radio.RadioActivity", lpparam.classLoader, "onCreate", Bundle.class, onCreate);
-    XposedHelpers.findAndHookMethod("android.media.AudioManager", lpparam.classLoader, "setParameters", String.class, setParameters);
-    Log.d(TAG,"com.microntek.radio hook OK");
+    Log.d(TAG, "package com.microntek.radio");
+    Utils.setTag(TAG);
+    Utils.readXposedMap();
+    Utils.findAndHookMethod("com.microntek.radio.RadioActivity", lpparam.classLoader, "onCreate", Bundle.class, onCreate);
+    Utils.findAndHookMethod("android.media.AudioManager", lpparam.classLoader, "setParameters", String.class, setParameters);
+    Log.d(TAG, "com.microntek.radio hook OK");
   }
-      
-};
+}
+

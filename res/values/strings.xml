@@ -1,7 +1,7 @@
 <resources>
 
     <string name="app_name" translatable="false">XposedMtcManager</string>
-    <string name="app_version_name" translatable="false">1.9</string>    
-    <string name="app_desc">Microntek service modifications</string>
+    <string name="app_version_name" translatable="false">2.5</string>    
+    <string name="app_desc">MTCC/MTCB Microntek service modifications</string>
 
 </resources>
